@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>路線成本估算 APP</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+  <!-- React Core -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  
+  <!-- Babel -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    body { 
+      background-color: #0f172a; 
+      color: #f8fafc;
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior-y: none;
+    }
+    
+    /* 隱藏捲軸但保留捲動功能 */
+    .hide-scrollbar::-webkit-scrollbar { display: none; }
+    .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    
+    /* APP 底部安全距離 (適用於 iPhone 等全螢幕裝置) */
+    .pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+    .pt-safe { padding-top: env(safe-area-inset-top); }
+
+    .glass-card {
+      background: rgba(30, 41, 59, 0.7);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    
+    .gemini-gradient {
+      background: linear-gradient(135deg, #4f46e5 0%, #06b6d4 100%);
+    }
+
+    input[type="number"], input[type="text"], input[type="month"] {
+      font-size: 16px; /* 防止 iOS Safari 自動放大 */
+    }
+  </style>
+</head>
+<body class="font-sans antialiased overflow-hidden selection:bg-emerald-500/30">
+
+  <div id="root" class="h-screen w-full max-w-md mx-auto bg-slate-950 relative shadow-2xl flex flex-col"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    // ==========================================
+    // 🚀 雲端與 API 設定
+    // ==========================================
+    const GAS_URL = "https://script.google.com/macros/s/AKfycbxMwgKyp5YcZ5ZDp6Q53V6qpA4sBmwoht3li9hGanbJFizk06ZazA7ohYxTNmQHJYbw/exec"; 
+    const GOOGLE_MAPS_KEY = "AIzaSyDVt5ap79LCy2LPi7eWuCcl9MiRm7uKVCM";
+    const GEMINI_API_KEY = ""; // 系統自動注入
+
+    const Icon = ({ name, className = "", size = "1rem" }) => <i className={`fa-solid ${name} ${className}`} style={{fontSize: size}}></i>;
+
+    // --- Gemini API Call ---
+    async function callGemini(userQuery, systemPrompt = "") {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`;
+      const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] } };
+      for (let i = 0; i < 3; i++) {
+        try {
+          const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+          if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+          const result = await res.json();
+          return result.candidates?.[0]?.content?.parts?.[0]?.text || "無法回覆。";
+        } catch (error) { if (i === 2) throw error; await new Promise(r => setTimeout(r, 1000 * Math.pow(2, i))); }
+      }
+    }
+
+    function App() {
+      // --- APP 狀態 ---
+      const [activeTab, setActiveTab] = useState('model'); // model, history, ai
+      const [toast, setToast] = useState({ show: false, message: '', type: 'success' });
+      const [isSyncing, setIsSyncing] = useState(false);
+
+      // --- 建模參數 ---
+      const [routeName, setRouteName] = useState('北高主線');
+      const [startPoint, setStartPoint] = useState('烏日');
+      const [endPoint, setEndPoint] = useState('大溪');
+      const [mileage, setMileage] = useState(320);
+      const [fuelPrice, setFuelPrice] = useState(29.5);
+      const [fuelConsumption, setFuelConsumption] = useState(2.7);
+      const [ureaRate, setUreaRate] = useState(2.5);
+      const [maintenanceRate, setMaintenanceRate] = useState(2.5);
+      const [etagRate, setEtagRate] = useState(1.0);
+      const [driverSalary, setDriverSalary] = useState(3000);
+      const [loan, setLoan] = useState(0);
+      const [insurance, setInsurance] = useState(0);
+      const [taxes, setTaxes] = useState(0);
+
+      const [cloudRoutes, setCloudRoutes] = useState([]);
+      const [isCalculating, setIsCalculating] = useState(false);
+      
+      // --- AI 狀態 ---
+      const [aiInput, setAiInput] = useState('');
+      const [aiMessages, setAiMessages] = useState([
+        { role: 'assistant', content: '您好！我是您的 AI 成本優化顧問。我可以幫您分析當前的路線成本或提供節流建議。' }
+      ]);
+      const [isAILoading, setIsAILoading] = useState(false);
+      const messagesEndRef = useRef(null);
+
+      // --- 初始化 ---
+      useEffect(() => { loadCloudData(); loadGoogleMaps(); }, []);
+      useEffect(() => { if (activeTab === 'ai' && messagesEndRef.current) messagesEndRef.current.scrollIntoView({ behavior: 'smooth' }); }, [aiMessages, activeTab]);
+
+      const showToast = (message, type = 'success') => {
+        setToast({ show: true, message, type });
+        setTimeout(() => setToast({ show: false, message: '', type: 'success' }), 3000);
+      };
+
+      const loadGoogleMaps = () => {
+        if (!window.google) { const script = document.createElement('script'); script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_KEY}`; script.async = true; document.head.appendChild(script); }
+      };
+
+      const loadCloudData = async () => {
+        setIsSyncing(true);
+        try {
+          const res = await fetch(`${GAS_URL}?sheet=routes`);
+          const data = await res.json();
+          if (Array.isArray(data)) setCloudRoutes(data);
+        } catch (e) { showToast("雲端讀取失敗，請檢查網路", "error"); } 
+        finally { setIsSyncing(false); }
+      };
+
+      // --- 成本核心算法 ---
+      const stats = useMemo(() => {
+        const dist = parseFloat(mileage) || 0;
+        const fuelUsed = dist / fuelConsumption;
+        const cFuel = fuelUsed * fuelPrice;
+        const cUrea = cFuel * (parseFloat(ureaRate) / 100) || 0;
+        const cMaint = dist * maintenanceRate;
+        const cEtag = dist * etagRate;
+        
+        const fSalary = parseFloat(driverSalary) || 0;
+        const fLoan = (parseFloat(loan) || 0) / 30;
+        const fFixed = (parseFloat(insurance) || 0) / 365 + (parseFloat(taxes) || 0) / 365;
+
+        const dailyTotal = cFuel + cUrea + cMaint + cEtag + fSalary + fLoan + fFixed;
+
+        return {
+          dailyTotal,
+          costPerKm: dist > 0 ? dailyTotal / dist : 0,
+          breakdown: [
+            { label: '油資', value: cFuel, color: 'bg-blue-500', icon: 'fa-gas-pump' },
+            { label: '薪資', value: fSalary, color: 'bg-emerald-500', icon: 'fa-user' },
+            { label: '保修', value: cMaint, color: 'bg-amber-500', icon: 'fa-wrench' },
+            { label: '規費/貸款', value: fLoan + fFixed, color: 'bg-rose-500', icon: 'fa-building-columns' },
+            { label: 'E-tag', value: cEtag, color: 'bg-slate-400', icon: 'fa-road' },
+            { label: '尿素', value: cUrea, color: 'bg-cyan-500', icon: 'fa-droplet' }
+          ]
+        };
+      }, [mileage, fuelPrice, fuelConsumption, ureaRate, maintenanceRate, etagRate, driverSalary, loan, insurance, taxes]);
+
+      // --- 功能操作 ---
+      const calculateDistance = async () => {
+        if (!startPoint || !endPoint) return showToast("請填寫起點與終點", "error");
+        setIsCalculating(true);
+        try {
+          const service = new window.google.maps.DistanceMatrixService();
+          service.getDistanceMatrix({ origins: [startPoint], destinations: [endPoint], travelMode: 'DRIVING' }, (response, status) => {
+            if (status === 'OK' && response.rows[0].elements[0].status === 'OK') {
+              const dist = Math.ceil(response.rows[0].elements[0].distance.value / 1000); setMileage(dist); showToast(`算距完成：${dist} KM`);
+            } else { showToast("地圖算距失敗", "error"); }
+            setIsCalculating(false);
+          });
+        } catch (e) { showToast("Google Maps 未就緒", "error"); setIsCalculating(false); }
+      };
+
+      const handleSave = async () => {
+        if (!routeName) return showToast("請輸入路線名稱", "error");
+        setIsSyncing(true);
+        const newRoute = { id: `R-${Date.now()}`, name: routeName, origin: startPoint, dest: endPoint, mileage: Number(mileage), totalCost: Math.round(stats.dailyTotal), costPerKm: Number(stats.costPerKm.toFixed(2)), createdAt: new Date().toLocaleString() };
+        try {
+          await fetch(GAS_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action: 'create', sheet: 'routes', data: newRoute }) });
+          setCloudRoutes([newRoute, ...cloudRoutes]); showToast("已儲存至雲端"); setActiveTab('history');
+        } catch (e) { showToast("雲端寫入失敗", "error"); } 
+        finally { setIsSyncing(false); }
+      };
+
+      const handleDelete = async (id) => {
+        setIsSyncing(true);
+        try {
+          await fetch(GAS_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action: 'delete', sheet: 'routes', id: id }) });
+          setCloudRoutes(cloudRoutes.filter(r => r.id !== id)); showToast("已刪除模型");
+        } catch (e) { showToast("刪除失敗", "error"); } 
+        finally { setIsSyncing(false); }
+      };
+
+      const handleAISend = async () => {
+        if (!aiInput.trim()) return;
+        setAiMessages(prev => [...prev, { role: 'user', content: aiInput }]);
+        const query = aiInput; setAiInput(''); setIsAILoading(true);
+
+        const systemPrompt = `你是一位專業的運務財務顧問。當前正在估算的路線為「${routeName}」，里程 ${mileage}KM。
+目前成本結構：總成本 $${Math.round(stats.dailyTotal)}，每公里 $${stats.costPerKm.toFixed(2)}。
+油耗設定 ${fuelConsumption} km/L。請根據這些數據給予精簡、專業的優化建議或回答問題。以繁體中文回覆。`;
+
+        try {
+          const response = await callGemini(query, systemPrompt);
+          setAiMessages(prev => [...prev, { role: 'assistant', content: response }]);
+        } catch (err) { setAiMessages(prev => [...prev, { role: 'assistant', content: "AI 伺服器連線異常，請稍後再試。" }]); } 
+        finally { setIsAILoading(false); }
+      };
+
+      // --- UI Components ---
+      const InputGroup = ({ label, type="number", value, onChange, icon, step="any", placeholder }) => (
+        <div className="flex flex-col gap-1.5 mb-4">
+          <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider pl-1">{label}</label>
+          <div className="relative">
+            {icon && <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500"><Icon name={icon} /></div>}
+            <input type={type} step={step} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} className={`w-full bg-slate-900 border border-slate-700 text-white rounded-xl py-3 outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-all ${icon ? 'pl-10' : 'pl-4'} pr-4`} />
+          </div>
+        </div>
+      );
+
+      return (
+        <div className="h-full flex flex-col pt-safe bg-slate-950">
+          {/* Header */}
+          <header className="h-14 flex items-center justify-between px-5 bg-slate-900/80 backdrop-blur-md border-b border-slate-800 shrink-0 z-20">
+            <div className="flex items-center gap-2">
+              <div className="bg-emerald-500/20 text-emerald-400 p-1.5 rounded-lg"><Icon name="fa-truck-fast" size="1.2rem"/></div>
+              <h1 className="font-bold text-white text-lg tracking-wide">路線成本估算</h1>
+            </div>
+            {isSyncing ? <Icon name="fa-rotate" className="text-emerald-500 animate-spin" /> : <div className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_#10b981]"></div>}
+          </header>
+
+          {/* Main Scrollable Area */}
+          <main className="flex-1 overflow-y-auto hide-scrollbar relative">
+            
+            {/* Tab 1: Model Input */}
+            <div className={`absolute inset-0 transition-opacity duration-300 overflow-y-auto hide-scrollbar pb-24 ${activeTab === 'model' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+              
+              {/* Sticky Cost Summary Card */}
+              <div className="sticky top-0 z-20 p-4 bg-slate-950/90 backdrop-blur-xl border-b border-slate-800 shadow-xl">
+                <div className="flex justify-between items-end mb-2">
+                  <p className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest">預估單趟總成本</p>
+                  <p className="text-xs text-slate-500 font-mono text-right">{mileage} KM</p>
+                </div>
+                <div className="flex justify-between items-baseline">
+                  <span className="text-3xl font-black text-white font-mono tracking-tight"><span className="text-xl text-slate-500 mr-1">$</span>{Math.round(stats.dailyTotal).toLocaleString()}</span>
+                  <div className="text-right">
+                    <span className="text-lg font-bold text-blue-400 font-mono">${stats.costPerKm.toFixed(1)}</span>
+                    <span className="text-[10px] text-slate-500 ml-1">/KM</span>
+                  </div>
+                </div>
+                {/* Mini Progress Bar */}
+                <div className="h-2 w-full bg-slate-800 rounded-full mt-3 flex overflow-hidden">
+                  {stats.breakdown.map((item, idx) => (
+                    <div key={idx} className={`${item.color} h-full`} style={{ width: `${(item.value / stats.dailyTotal) * 100}%` }}></div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="p-4 space-y-6">
+                {/* Section: Route */}
+                <section className="glass-card p-5 rounded-2xl">
+                  <h2 className="text-sm font-bold text-emerald-400 mb-4 flex items-center gap-2"><Icon name="fa-route"/> 路線選定</h2>
+                  <InputGroup label="路線名稱" type="text" icon="fa-tag" value={routeName} onChange={setRouteName} placeholder="例: 北高特急" />
+                  <div className="flex gap-2">
+                    <div className="flex-1"><InputGroup label="起點" type="text" value={startPoint} onChange={setStartPoint} /></div>
+                    <div className="flex items-center justify-center w-6 text-slate-600 mt-5"><Icon name="fa-arrow-right" size="0.8rem"/></div>
+                    <div className="flex-1"><InputGroup label="終點" type="text" value={endPoint} onChange={setEndPoint} /></div>
+                  </div>
+                  <div className="flex gap-3 items-end">
+                    <div className="flex-1"><InputGroup label="單趟里程 (KM)" value={mileage} onChange={setMileage} icon="fa-ruler" /></div>
+                    <button onClick={calculateDistance} disabled={isCalculating} className="mb-4 h-[46px] px-4 bg-slate-800 text-emerald-400 rounded-xl font-bold border border-slate-700 active:bg-slate-700 transition-colors shrink-0">
+                      {isCalculating ? <Icon name="fa-rotate" className="animate-spin"/> : "算距"}
+                    </button>
+                  </div>
+                </section>
+
+                {/* Section: Variables */}
+                <section className="glass-card p-5 rounded-2xl">
+                  <h2 className="text-sm font-bold text-blue-400 mb-4 flex items-center gap-2"><Icon name="fa-gas-pump"/> 動態成本 (油資/耗損)</h2>
+                  <div className="grid grid-cols-2 gap-x-4">
+                    <InputGroup label="柴油 (NT$/L)" value={fuelPrice} onChange={setFuelPrice} step="0.1" />
+                    <InputGroup label="油耗 (km/L)" value={fuelConsumption} onChange={setFuelConsumption} step="0.1" />
+                    <InputGroup label="尿素比例 (%)" value={ureaRate} onChange={setUreaRate} step="0.1" />
+                    <InputGroup label="保修 (NT$/KM)" value={maintenanceRate} onChange={setMaintenanceRate} step="0.1" />
+                    <div className="col-span-2"><InputGroup label="E-tag (NT$/KM)" value={etagRate} onChange={setEtagRate} step="0.1" /></div>
+                  </div>
+                </section>
+
+                {/* Section: Fixed */}
+                <section className="glass-card p-5 rounded-2xl">
+                  <h2 className="text-sm font-bold text-rose-400 mb-4 flex items-center gap-2"><Icon name="fa-building-columns"/> 固定分攤成本</h2>
+                  <InputGroup label="司機日薪 (NT$)" value={driverSalary} onChange={setDriverSalary} icon="fa-wallet" />
+                  <div className="grid grid-cols-3 gap-x-3">
+                    <InputGroup label="月貸款" value={loan} onChange={setLoan} />
+                    <InputGroup label="年保費" value={insurance} onChange={setInsurance} />
+                    <InputGroup label="年稅金" value={taxes} onChange={setTaxes} />
+                  </div>
+                </section>
+
+                <button onClick={handleSave} className="w-full bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white font-bold py-4 rounded-2xl flex items-center justify-center gap-2 transition-all shadow-lg shadow-emerald-900/50">
+                  <Icon name="fa-cloud-arrow-up" /> 儲存路線模型
+                </button>
+              </div>
+            </div>
+
+            {/* Tab 2: History */}
+            <div className={`absolute inset-0 transition-opacity duration-300 overflow-y-auto hide-scrollbar pb-24 p-4 ${activeTab === 'history' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+              <h2 className="text-lg font-bold text-white mb-4 flex items-center gap-2"><Icon name="fa-database" className="text-emerald-400"/> 雲端已存模型</h2>
+              <div className="space-y-4">
+                {cloudRoutes.map(item => (
+                  <div key={item.id} className="glass-card p-4 rounded-2xl relative">
+                    <button onClick={() => handleDelete(item.id)} className="absolute top-4 right-4 p-2 text-slate-500 active:text-rose-400 bg-slate-900 rounded-full shadow"><Icon name="fa-trash-can"/></button>
+                    <h3 className="font-bold text-white text-lg mb-2">{item.name}</h3>
+                    <p className="text-xs text-slate-400 mb-3 bg-slate-900/50 inline-block px-2 py-1 rounded border border-slate-800">{item.origin} <Icon name="fa-arrow-right" size="0.6rem" className="mx-1"/> {item.dest}</p>
+                    <div className="flex gap-4 border-t border-slate-700/50 pt-3 mt-1">
+                      <div><p className="text-[10px] text-slate-500 mb-0.5">總成本</p><p className="font-mono font-bold text-emerald-400">${item.totalCost?.toLocaleString()}</p></div>
+                      <div><p className="text-[10px] text-slate-500 mb-0.5">均攤/KM</p><p className="font-mono font-bold text-blue-400">${item.costPerKm}</p></div>
+                      <div><p className="text-[10px] text-slate-500 mb-0.5">里程</p><p className="font-mono font-bold text-slate-300">{item.mileage}KM</p></div>
+                    </div>
+                  </div>
+                ))}
+                {cloudRoutes.length === 0 && (
+                  <div className="text-center py-20 text-slate-500"><Icon name="fa-inbox" size="3rem" className="mb-4 block mx-auto opacity-50"/><p>尚無儲存的模型</p></div>
+                )}
+              </div>
+            </div>
+
+            {/* Tab 3: AI Advisor */}
+            <div className={`absolute inset-0 transition-opacity duration-300 flex flex-col pb-[72px] ${activeTab === 'ai' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+               <div className="gemini-gradient p-4 shrink-0 shadow-lg relative z-20">
+                 <h2 className="text-white font-bold flex items-center gap-2 text-sm"><Icon name="fa-sparkles"/> AI 成本優化顧問</h2>
+                 <p className="text-white/80 text-xs mt-1">自動帶入當前估算之【{routeName}】數據進行分析</p>
+               </div>
+               <div className="flex-1 overflow-y-auto p-4 space-y-4 hide-scrollbar">
+                  {aiMessages.map((msg, idx) => (
+                    <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`max-w-[85%] rounded-2xl p-3 text-sm shadow-md leading-relaxed ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-br-sm' : 'glass-card text-slate-200 rounded-bl-sm'}`}>
+                        {msg.content}
+                      </div>
+                    </div>
+                  ))}
+                  {isAILoading && (
+                    <div className="flex justify-start"><div className="max-w-[80%] glass-card rounded-2xl p-3 rounded-bl-sm flex gap-2 items-center text-sm text-slate-400"><Icon name="fa-spinner" className="animate-spin text-indigo-400"/> 分析計算中...</div></div>
+                  )}
+                  <div ref={messagesEndRef} className="h-2"></div>
+               </div>
+               <div className="p-3 bg-slate-900 border-t border-slate-800 shrink-0 absolute bottom-[72px] w-full">
+                 <div className="flex gap-2">
+                   <input type="text" value={aiInput} onChange={e=>setAiInput(e.target.value)} onKeyPress={e => e.key === 'Enter' && handleAISend()} placeholder="詢問節流建議或分析..." className="flex-1 bg-slate-950 border border-slate-700 rounded-full px-4 py-2.5 text-sm text-white outline-none focus:border-indigo-500" />
+                   <button onClick={handleAISend} disabled={!aiInput.trim() || isAILoading} className="w-11 h-11 rounded-full bg-indigo-600 active:bg-indigo-700 flex items-center justify-center text-white disabled:opacity-50"><Icon name="fa-paper-plane"/></button>
+                 </div>
+               </div>
+            </div>
+
+          </main>
+
+          {/* Bottom Navigation */}
+          <nav className="h-[72px] pb-safe bg-slate-900/95 backdrop-blur-xl border-t border-slate-800 flex justify-around items-center px-2 shrink-0 z-50">
+            <button onClick={()=>setActiveTab('model')} className={`flex flex-col items-center justify-center w-full h-full gap-1 transition-colors ${activeTab === 'model' ? 'text-emerald-400' : 'text-slate-500'}`}>
+              <Icon name="fa-calculator" size="1.2rem" />
+              <span className="text-[10px] font-bold">估算建模</span>
+            </button>
+            <button onClick={()=>setActiveTab('history')} className={`flex flex-col items-center justify-center w-full h-full gap-1 transition-colors ${activeTab === 'history' ? 'text-blue-400' : 'text-slate-500'}`}>
+              <Icon name="fa-database" size="1.2rem" />
+              <span className="text-[10px] font-bold">雲端紀錄</span>
+            </button>
+            <button onClick={()=>setActiveTab('ai')} className={`flex flex-col items-center justify-center w-full h-full gap-1 transition-colors ${activeTab === 'ai' ? 'text-indigo-400' : 'text-slate-500'}`}>
+              <Icon name="fa-sparkles" size="1.2rem" />
+              <span className="text-[10px] font-bold">AI 顧問</span>
+            </button>
+          </nav>
+
+          {/* Toast */}
+          {toast.show && (
+            <div className={`fixed top-16 left-1/2 -translate-x-1/2 z-[100] px-5 py-3 rounded-full shadow-2xl border text-sm font-bold flex items-center gap-2 whitespace-nowrap animate-in slide-in-from-top-5 duration-300
+              ${toast.type === 'error' ? 'bg-rose-900/90 border-rose-500 text-white' : 'bg-slate-800/90 border-emerald-500 text-emerald-400'}`}>
+              <Icon name={toast.type === 'error' ? 'fa-circle-exclamation' : 'fa-circle-check'} /> {toast.message}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
