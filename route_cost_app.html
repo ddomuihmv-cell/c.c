@@ -64,13 +64,17 @@
     // ==========================================
     const GAS_URL = "https://script.google.com/macros/s/AKfycbxMwgKyp5YcZ5ZDp6Q53V6qpA4sBmwoht3li9hGanbJFizk06ZazA7ohYxTNmQHJYbw/exec"; 
     const GOOGLE_MAPS_KEY = "AIzaSyDVt5ap79LCy2LPi7eWuCcl9MiRm7uKVCM";
-    const GEMINI_API_KEY = ""; // 系統自動注入
+    
+    // 👇 1. 請將 "" 中間替換成您剛剛申請的 API Key (例如: "AIzaSy...")
+    const GEMINI_API_KEY = "AIzaSyCdYs3x2MVK8hbmbFD5BukNIVW23SKEAFk"; 
 
     const Icon = ({ name, className = "", size = "1rem" }) => <i className={`fa-solid ${name} ${className}`} style={{fontSize: size}}></i>;
 
     // --- Gemini API Call ---
     async function callGemini(userQuery, systemPrompt = "") {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`;
+      // 🌟 2. 智慧判斷：若有填寫 API Key 則使用正式版 1.5-flash 模型，否則維持測試版
+      const model = GEMINI_API_KEY ? "gemini-1.5-flash" : "gemini-2.5-flash-preview-09-2025";
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
       const payload = { contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] } };
       for (let i = 0; i < 3; i++) {
         try {
@@ -329,7 +333,10 @@
         try {
           const response = await callGemini(query, systemPrompt);
           setAiMessages(prev => [...prev, { role: 'assistant', content: response }]);
-        } catch (err) { setAiMessages(prev => [...prev, { role: 'assistant', content: "AI 伺服器連線異常，請稍後再試。" }]); } 
+        } catch (err) { 
+          // 🌟 3. 更明確的錯誤提示
+          setAiMessages(prev => [...prev, { role: 'assistant', content: "⚠️ AI 伺服器連線異常。如果您已將 APP 發布至 GitHub，請確認您已在程式碼 51 行處填入專屬的 GEMINI_API_KEY。" }]); 
+        } 
         finally { setIsAILoading(false); }
       };
 
@@ -342,7 +349,8 @@
           const response = await callGemini(prompt);
           setQuickInsight(response);
         } catch (e) {
-          setQuickInsight("無法取得 AI 診斷，請稍後再試。");
+          // 🌟 4. 更明確的錯誤提示
+          setQuickInsight("⚠️ 無法取得 AI 診斷。發布至 GitHub 需在程式碼填寫 GEMINI_API_KEY。");
         }
         setIsInsightLoading(false);
       };
